@@ -61,7 +61,7 @@
 
 > Due to abuse of the telegraph image hosting, the upload channel has switched to Telegram Channel. Please **update to the latest version (see the last section of chapter 3.1 for update instructions)** and set `TG_BOT_TOKEN` and `TG_CHAT_ID` according to the deployment requirements in the documentation, otherwise upload functionality will not work.
 >
-> Also, the **KV database is now mandatory**; if not configured before, please configure it as per the documentation.
+> Also, the **KV database is now mandatory**; if not configured before, please configure it as per the documentation. (For container/self-hosted users, you can enable `USE_LOCAL_DB=true` in a Node.js runtime to use the local file storage—see the note below.)
 >
 > For issues, please check section 5 FAQ first.
 
@@ -80,6 +80,17 @@ Free file hosting solution with full lifecycle features including **upload**, **
 Provides detailed deployment documentation, feature docs, development plans, update logs, FAQ, and more to help you get started quickly.
 
 [![recent update](https://recent-update.cfbed.sanyue.de/en)](https://cfbed.sanyue.de/en/guide/update-log.html)
+
+## 2.1 Container without KV/D1 (Telegram-only storage)
+
+If you want to run the backend in a self-hosted/container environment (for example by pulling the `ghcr.io/tyreamon/TEST` image) and keep Cloudflare Workers purely as a gateway, you can enable the local file database inside the container:
+
+1. Set `USE_LOCAL_DB=true` when running the container. Optionally set `LOCAL_DB_PATH=/data/local-db.json` to choose where the data file is stored.
+2. Mount a persistent volume (e.g. `-v /host/path:/app/data`) so that configurations and file indexes survive container restarts.
+3. Keep the Telegram channel environment variables (`TG_BOT_TOKEN`, `TG_CHAT_ID`, etc.) configured. Files will be uploaded to Telegram while metadata and settings are saved in the local database file.
+4. Cloudflare Workers remain responsible for auth/CDN gateway duties and no longer need to write to KV, which avoids KV write limits.
+
+> Note: the local database works only in a Node.js runtime (container/self-hosted). Cloudflare Pages/Workers still need KV or D1 support.
 
 # 3. Demo
 
