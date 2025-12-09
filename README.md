@@ -71,7 +71,7 @@
 
 > 由于telegraph图床被滥用，该项目上传渠道已切换至Telegram Channel，请**更新至最新版（更新方式见第3.1章最后一节）**，按照文档中的部署要求**设置`TG_BOT_TOKEN`和`TG_CHAT_ID`**，否则将无法正常使用上传功能。
 >
-> 此外，目前**KV数据库为必须配置**，如果以前未配置请按照文档说明配置。
+> 此外，目前**KV数据库为必须配置**，如果以前未配置请按照文档说明配置。（容器/自托管用户可以在 Node.js 运行时启用 `USE_LOCAL_DB=true` 使用本地文件存储，详见下文。）
 >
 > 出现问题，请先查看第5节常见问题Q&A部分。
 
@@ -91,6 +91,17 @@
 提供详细的部署文档、功能文档、开发计划、更新日志、常见问题解答等，帮助您快速上手。
 
 [![更新日志](https://recent-update.cfbed.sanyue.de/cn)](https://cfbed.sanyue.de/guide/update-log.html)
+
+## 2.1 容器无 KV/D1 部署（适合仅用 Telegram 存储）
+
+如果你只想在自托管/容器环境运行后端（例如直接拉取 `ghcr.io/tyreamon/TEST` 镜像），并让 Cloudflare Workers 只作为网关，可以在容器里启用本地文件数据库：
+
+1. 运行容器时设置环境变量 `USE_LOCAL_DB=true`，可选 `LOCAL_DB_PATH=/data/local-db.json` 指定数据文件保存位置。
+2. 为容器挂载持久卷（如 `-v /宿主目录:/app/data`），确保配置、文件索引等数据不会随容器删除而丢失。
+3. 按文档正常配置 Telegram 渠道环境变量（`TG_BOT_TOKEN`、`TG_CHAT_ID` 等），上传文件会直接落到 Telegram，索引与设置保存在本地数据库文件中。
+4. Cloudflare Workers 继续承担鉴权与 CDN 网关角色，无需再写入 KV，适合绕过 KV 写入额度限制。
+
+> 提示：本地数据库仅在 Node.js 运行时生效（容器/自托管场景），Cloudflare Pages/Workers 仍需 KV 或 D1 支持。
 
 # 3. Demo
 
