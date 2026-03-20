@@ -4,6 +4,7 @@
  */
 
 import { D1Database } from './d1Database.js';
+import { LocalFileDatabase } from './localFileDatabase.js';
 
 /**
  * 创建数据库适配器
@@ -12,14 +13,21 @@ import { D1Database } from './d1Database.js';
  */
 export function createDatabaseAdapter(env) {
     // 检查是否配置了数据库
+    const useLocalDbFlag = env.USE_LOCAL_DB === true || env.USE_LOCAL_DB === 'true' || env.USE_LOCAL_DB === '1';
+    const localDbPath = env.LOCAL_DB_PATH || env.local_db_path || env.local_db || null;
+    const isNodeRuntime = typeof process !== 'undefined' && !!process.versions?.node;
+
     if (env.img_url && typeof env.img_url.get === 'function') {
         // 使用KV存储
         return new KVAdapter(env.img_url);
     } else if (env.img_d1 && typeof env.img_d1.prepare === 'function') {
         // 使用D1数据库
         return new D1Database(env.img_d1);
+    } else if ((useLocalDbFlag || localDbPath) && isNodeRuntime) {
+        // 在容器/Node.js环境下使用本地文件数据库
+        return new LocalFileDatabase(localDbPath || './data/local-db.json');
     } else {
-        console.error('No database configured. Please configure either KV (env.img_url) or D1 (env.img_d1).');
+        console.error('No database configured. Please configure KV (env.img_url), D1 (env.img_d1), or enable local storage (USE_LOCAL_DB=true).');
         return null;
     }
 }
@@ -148,7 +156,7 @@ class KVAdapter {
 export function getDatabase(env) {
     var adapter = createDatabaseAdapter(env);
     if (!adapter) {
-        throw new Error('Database not configured. Please configure D1 database (env.img_d1) or KV storage (env.img_url).');
+        throw new Error('Database not configured. Please configure D1 database (env.img_d1), KV storage (env.img_url), or enable local storage (set USE_LOCAL_DB=true).');
     }
     return adapter;
 }
@@ -161,12 +169,18 @@ export function getDatabase(env) {
 export function checkDatabaseConfig(env) {
     var hasD1 = env.img_d1 && typeof env.img_d1.prepare === 'function';
     var hasKV = env.img_url && typeof env.img_url.get === 'function';
+    var useLocalDbFlag = env.USE_LOCAL_DB === true || env.USE_LOCAL_DB === 'true' || env.USE_LOCAL_DB === '1';
+    var localDbPath = env.LOCAL_DB_PATH || env.local_db_path || env.local_db || null;
+    var isNodeRuntime = typeof process !== 'undefined' && !!process.versions?.node;
+    var hasLocalDb = (useLocalDbFlag || localDbPath) && isNodeRuntime;
 
     return {
         hasD1: hasD1,
         hasKV: hasKV,
+        hasLocalDb: hasLocalDb,
         usingD1: hasD1,
         usingKV: !hasD1 && hasKV,
-        configured: hasD1 || hasKV
+        usingLocalDb: !hasD1 && !hasKV && hasLocalDb,
+        configured: hasD1 || hasKV || hasLocalDb
     };
 }

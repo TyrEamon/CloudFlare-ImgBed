@@ -116,19 +116,19 @@ async function fetchSampleRate(context) {
 export async function checkDatabaseConfig(context) {
   var env = context.env;
 
-  var dbConfig = checkDbConfig(env);
+    var dbConfig = checkDbConfig(env);
 
-  if (!dbConfig.configured) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: "数据库未配置 / Database not configured",
-        message: "请配置 KV 存储 (env.img_url) 或 D1 数据库 (env.img_d1)。 / Please configure KV storage (env.img_url) or D1 database (env.img_d1)."
-      }),
-      {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json"
+    if (!dbConfig.configured) {
+        return new Response(
+            JSON.stringify({
+                success: false,
+                error: "数据库未配置 / Database not configured",
+                message: "请配置 KV 存储 (env.img_url) 、D1 数据库 (env.img_d1) 或启用本地存储 (USE_LOCAL_DB=true)。 / Please configure KV storage (env.img_url), D1 database (env.img_d1), or enable local storage (USE_LOCAL_DB=true)."
+            }),
+            {
+                status: 500,
+                headers: {
+                    "Content-Type": "application/json"
         }
       }
     );
