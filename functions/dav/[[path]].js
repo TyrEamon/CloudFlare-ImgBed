@@ -1,29 +1,194 @@
 // WebDAV 服务支持
 import { fetchSecurityConfig, fetchOthersConfig } from "../utils/sysConfig";
 
+const webDavMethods = 'OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL';
+const webDavAllowedHeaders = [
+    'Authorization',
+    'Content-Type',
+    'Depth',
+    'Destination',
+    'Overwrite',
+    'Range',
+    'If-Match',
+    'If-None-Match',
+    'X-Requested-With',
+].join(', ');
+const webDavExposedHeaders = [
+    'Accept-Ranges',
+    'Allow',
+    'Content-Length',
+    'Content-Range',
+    'DAV',
+    'ETag',
+    'Location',
+    'MS-Author-Via',
+    'WWW-Authenticate',
+].join(', ');
+
 export async function onRequest(context) {
     const { request, env } = context;
+    const othersConfig = await fetchOthersConfig(env);
 
-    const authResponse = await checkAuth(request, env);
-    if (authResponse) return authResponse;
+    if (request.method === 'OPTIONS') return handleOptions(request, othersConfig);
+
+    const authResponse = checkAuth(request, othersConfig);
+    if (authResponse) return withCorsHeaders(authResponse, request, othersConfig);
 
     // 从请求路径中替换第一个 /dav 部分
     const url = new URL(request.url);
     url.pathname = url.pathname.replace(/^\/dav/, '') || '/';
     const modifiedRequest = new Request(url.toString(), request);
+    const rootDir = normalizeRootDir(othersConfig.webDAV?.rootDir || '');
 
+    let response;
     switch (modifiedRequest.method) {
-        case 'OPTIONS': return handleOptions(modifiedRequest);
-        case 'PROPFIND': return handlePropfind(modifiedRequest, env);
-        case 'PUT': return handlePut(modifiedRequest, env);
-        case 'DELETE': return handleDelete(modifiedRequest, env);
-        case 'GET': return handleGet(modifiedRequest, env);
-        case 'MKCOL': return new Response(null, { status: 201 });
-        default: return new Response('Method Not Allowed', { status: 405 });
+        case 'PROPFIND':
+            response = await handlePropfind(modifiedRequest, env, rootDir);
+            break;
+        case 'PUT':
+            response = await handlePut(modifiedRequest, env, rootDir, othersConfig);
+            break;
+        case 'DELETE':
+            response = await handleDelete(modifiedRequest, env, rootDir);
+            break;
+        case 'GET':
+        case 'HEAD':
+            response = await handleGet(modifiedRequest, env, rootDir);
+            break;
+        case 'MKCOL':
+            response = new Response(null, { status: 201 });
+            break;
+        default:
+            response = new Response('Method Not Allowed', { status: 405 });
     }
+
+    return withCorsHeaders(response, request, othersConfig);
 }
 
 // --- UTILITY FUNCTIONS ---
+
+function getCorsHeaders(request, othersConfig) {
+    const origin = request.headers.get('Origin');
+    const allowedOrigin = getAllowedCorsOrigin(origin, othersConfig);
+    const headers = {
+        'Access-Control-Allow-Origin': allowedOrigin,
+        'Access-Control-Allow-Methods': webDavMethods,
+        'Access-Control-Allow-Headers': webDavAllowedHeaders,
+        'Access-Control-Expose-Headers': webDavExposedHeaders,
+        'Access-Control-Max-Age': '86400',
+    };
+
+    if (origin && allowedOrigin !== 'null') {
+        headers['Access-Control-Allow-Credentials'] = 'true';
+    }
+
+    return headers;
+}
+
+function getAllowedCorsOrigin(origin, othersConfig) {
+    if (!origin) return '*';
+
+    const configuredOrigins = othersConfig.webDAV?.corsOrigins || '';
+    const allowedOrigins = configuredOrigins
+        .split(',')
+        .map(normalizeOrigin)
+        .filter(Boolean);
+
+    if (allowedOrigins.length === 0 || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+        return origin;
+    }
+
+    return 'null';
+}
+
+function normalizeOrigin(origin) {
+    const value = (origin || '').trim().replace(/\/+$/, '');
+    if (value === '*') return value;
+
+    try {
+        return new URL(value).origin;
+    } catch {
+        return '';
+    }
+}
+
+function appendVary(headers, value) {
+    const existing = headers.get('Vary');
+    const values = existing ? existing.split(',').map(item => item.trim()) : [];
+    if (!values.some(item => item.toLowerCase() === value.toLowerCase())) {
+        values.push(value);
+    }
+    headers.set('Vary', values.join(', '));
+}
+
+function withCorsHeaders(response, request, othersConfig) {
+    const headers = new Headers(response.headers);
+    const corsHeaders = getCorsHeaders(request, othersConfig);
+    Object.entries(corsHeaders).forEach(([key, value]) => headers.set(key, value));
+    appendVary(headers, 'Origin');
+
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+    });
+}
+
+function normalizeRootDir(dir) {
+    return normalizeRelativePath(dir);
+}
+
+function normalizeRelativePath(path) {
+    return (path || '')
+        .replace(/\.\./g, '_')
+        .replace(/\\/g, '/')
+        .replace(/\/{2,}/g, '/')
+        .replace(/^\/+/, '')
+        .replace(/\/+$/, '');
+}
+
+function joinDavPath(rootDir, path) {
+    const root = normalizeRootDir(rootDir);
+    const cleanPath = normalizeRelativePath(path);
+    return [root, cleanPath].filter(Boolean).join('/');
+}
+
+function getRequestPath(request) {
+    return decodeURIComponent(new URL(request.url).pathname);
+}
+
+function getStoragePathFromRequest(request, rootDir) {
+    return joinDavPath(rootDir, getRequestPath(request));
+}
+
+function stripRootDirFromPath(path, rootDir) {
+    const cleanPath = normalizeRelativePath(path);
+    const root = normalizeRootDir(rootDir);
+
+    if (!root) return cleanPath;
+    if (cleanPath === root) return '';
+    if (cleanPath.startsWith(`${root}/`)) return cleanPath.substring(root.length + 1);
+    return cleanPath;
+}
+
+function encodePathSegments(path) {
+    return normalizeRelativePath(path)
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/');
+}
+
+function toVirtualContents(contents, rootDir) {
+    return {
+        files: contents.files.map(file => ({
+            ...file,
+            name: stripRootDirFromPath(file.name, rootDir),
+        })).filter(file => file.name),
+        directories: contents.directories
+            .map(dir => stripRootDirFromPath(dir, rootDir))
+            .filter(Boolean),
+    };
+}
 
 async function getApiHeaders(env) {
     const securityConfig = await fetchSecurityConfig(env);
@@ -44,9 +209,7 @@ async function getApiHeaders(env) {
     };
 }
 
-async function checkAuth(request, env) {
-    const othersConfig = await fetchOthersConfig(env);
-
+function checkAuth(request, othersConfig) {
     const enabled = othersConfig.webDAV.enabled;
     if (!enabled) return new Response('WebDAV is disabled', { status: 403 }); // WebDAV disabled
 
@@ -77,25 +240,31 @@ async function checkAuth(request, env) {
 
 // --- WEBDAV METHOD HANDLERS ---
 
-function handleOptions(request) {
+function handleOptions(request, othersConfig) {
     return new Response(null, {
         status: 204,
         headers: {
-            'Allow': 'OPTIONS, GET, PUT, DELETE, PROPFIND, MKCOL',
+            ...getCorsHeaders(request, othersConfig),
+            'Allow': webDavMethods,
             'DAV': '1, 2',
             'MS-Author-Via': 'DAV',
+            'Vary': 'Origin',
         },
     });
 }
 
-async function handleGet(request, env) {
-    const path = decodeURIComponent(new URL(request.url).pathname);
+async function handleGet(request, env, rootDir) {
+    const path = getRequestPath(request);
+    const storagePath = getStoragePathFromRequest(request, rootDir);
 
     if (path.endsWith('/')) { // Directory listing
         try {
-            const dir = path === '/' ? '' : path.substring(1, path.length - 1);
-            const contents = await fetchDirectoryContents(dir, env, request);
-            const html = generateDirectoryListingHtml(path, contents);
+            const contents = await fetchDirectoryContents(storagePath, env, request);
+            const virtualContents = toVirtualContents(contents, rootDir);
+            const html = generateDirectoryListingHtml(path, virtualContents);
+            if (request.method === 'HEAD') {
+                return new Response(null, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+            }
             return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
         } catch (error) {
             console.error('GET (directory) failed:', error.stack);
@@ -103,9 +272,9 @@ async function handleGet(request, env) {
         }
     } else { // File download
         try {
-            const fileUrl = new URL(`/file${path}`, request.url);
+            const fileUrl = new URL(`/file/${encodePathSegments(storagePath)}`, request.url);
 
-            const fileResponse = await fetch(fileUrl.toString());
+            const fileResponse = await fetch(fileUrl.toString(), { method: request.method });
 
             if (!fileResponse.ok) {
                  return new Response('File not found', { status: fileResponse.status, statusText: fileResponse.statusText });
@@ -122,9 +291,9 @@ async function handleGet(request, env) {
     }
 }
 
-async function handlePut(request, env) {
-    const fullPath = decodeURIComponent(new URL(request.url).pathname.substring(1));
-    if (!fullPath || fullPath.endsWith('/')) {
+async function handlePut(request, env, rootDir, othersConfig) {
+    const fullPath = getStoragePathFromRequest(request, rootDir);
+    if (!fullPath || getRequestPath(request).endsWith('/')) {
         return new Response('Invalid file name', { status: 400 });
     }
 
@@ -133,18 +302,7 @@ async function handlePut(request, env) {
     const fileName = lastSlashIndex > -1 ? fullPath.substring(lastSlashIndex + 1) : fullPath;
 
     // 路径安全处理：防止路径穿越
-    if (uploadFolder) {
-        // 防止双重编码绕过：仅在检测到编码字符时解码
-        if (/%[0-9a-fA-F]{2}/.test(uploadFolder)) {
-            try { uploadFolder = decodeURIComponent(uploadFolder); } catch (e) { /* ignore */ }
-        }
-        uploadFolder = uploadFolder
-            .replace(/\.\./g, '_')
-            .replace(/\\/g, '/')
-            .replace(/\/{2,}/g, '/')
-            .replace(/^\/+/, '')
-            .replace(/\/+$/, '');
-    }
+    uploadFolder = normalizeRelativePath(uploadFolder);
     
     const fileContent = await request.blob();
     const formData = new FormData();
@@ -156,7 +314,6 @@ async function handlePut(request, env) {
     }
 
     // 获取 WebDAV 配置的上传渠道
-    const othersConfig = await fetchOthersConfig(env);
     const webdavConfig = othersConfig.webDAV || {};
     if (webdavConfig.uploadChannel) {
         uploadUrl.searchParams.set('uploadChannel', webdavConfig.uploadChannel);
@@ -185,14 +342,14 @@ async function handlePut(request, env) {
     }
 }
 
-async function handleDelete(request, env) {
-    const path = decodeURIComponent(new URL(request.url).pathname.substring(1));
+async function handleDelete(request, env, rootDir) {
+    const path = getStoragePathFromRequest(request, rootDir);
     if (!path) return new Response('Invalid path for DELETE', { status: 400 });
 
-    const isFolder = path.endsWith('/');
+    const isFolder = getRequestPath(request).endsWith('/');
     const cleanPath = isFolder ? path.slice(0, -1) : path;
     
-    const deleteUrl = new URL(`/api/manage/delete/${cleanPath}`, request.url);
+    const deleteUrl = new URL(`/api/manage/delete/${encodePathSegments(cleanPath)}`, request.url);
     if (isFolder) deleteUrl.searchParams.set('folder', 'true');
 
     try {
@@ -213,12 +370,13 @@ async function handleDelete(request, env) {
     }
 }
 
-async function handlePropfind(request, env) {
-    const path = decodeURIComponent(new URL(request.url).pathname);
+async function handlePropfind(request, env, rootDir) {
+    const path = getRequestPath(request);
+    const storagePath = getStoragePathFromRequest(request, rootDir);
     try {
-        const dir = path === '/' ? '' : path.substring(1, path.endsWith('/') ? path.length - 1 : path.length);
-        const contents = await fetchDirectoryContents(dir, env, request);
-        const xml = generateWebDAVXml(path, contents);
+        const contents = await fetchDirectoryContents(storagePath, env, request);
+        const virtualContents = toVirtualContents(contents, rootDir);
+        const xml = generateWebDAVXml(path, virtualContents);
         return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     } catch (error) {
         console.error('Propfind failed:', error.stack);
